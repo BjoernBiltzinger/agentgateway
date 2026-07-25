@@ -3362,6 +3362,21 @@
       ]
     },
     "AzureAuth": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "description": "Backend policies (such as backendTunnel or backendTLS) used when connecting to\nthe identity provider to fetch credentials (Microsoft Entra ID, IMDS, etc.).\nTunnels are never applied to host-local endpoints (IMDS, the localhost\nidentity endpoints on Azure Arc and Cloud Shell), which are only reachable\ndirectly from the host. Credential requests have a default request\ntimeout of 5 seconds, overridable with an `http` requestTimeout policy;\nthe total token fetch is bounded by the same value.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SimpleLocalBackendPolicies"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "unevaluatedProperties": false,
       "oneOf": [
         {
           "description": "Use explicit Azure credentials",
@@ -3377,10 +3392,19 @@
                     "clientSecret": {
                       "type": "object",
                       "properties": {
+                        "tenantId": {
+                          "type": "string"
+                        },
                         "tenant_id": {
                           "type": "string"
                         },
+                        "clientId": {
+                          "type": "string"
+                        },
                         "client_id": {
+                          "type": "string"
+                        },
+                        "clientSecret": {
                           "type": "string"
                         },
                         "client_secret": {
@@ -3388,10 +3412,73 @@
                         }
                       },
                       "additionalProperties": false,
-                      "required": [
-                        "tenant_id",
-                        "client_id",
-                        "client_secret"
+                      "allOf": [
+                        {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "tenantId"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "tenant_id"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "not": {
+                            "required": [
+                              "tenantId",
+                              "tenant_id"
+                            ]
+                          }
+                        },
+                        {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "clientId"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "client_id"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "not": {
+                            "required": [
+                              "clientId",
+                              "client_id"
+                            ]
+                          }
+                        },
+                        {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "clientSecret"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "client_secret"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "not": {
+                            "required": [
+                              "clientSecret",
+                              "client_secret"
+                            ]
+                          }
+                        }
                       ]
                     }
                   },
@@ -3440,8 +3527,7 @@
           },
           "required": [
             "explicitConfig"
-          ],
-          "additionalProperties": false
+          ]
         },
         {
           "description": "Use implicit Azure auth. Note that this is for developer use-cases only!",
@@ -3454,8 +3540,7 @@
           },
           "required": [
             "developerImplicit"
-          ],
-          "additionalProperties": false
+          ]
         },
         {
           "description": "Automatically detect authentication method based on environment.\nUses Workload Identity on K8s, Managed Identity on Azure VMs, or Developer Tools locally.",
@@ -3468,8 +3553,7 @@
           },
           "required": [
             "implicit"
-          ],
-          "additionalProperties": false
+          ]
         }
       ]
     },

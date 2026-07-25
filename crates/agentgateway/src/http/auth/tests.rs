@@ -7,6 +7,45 @@ use crate::llm::bedrock::AwsRegion;
 use crate::test_helpers::proxymock::setup_proxy_test;
 
 #[test]
+fn test_azure_auth_deserializes_explicit_client_secret() {
+	use secrecy::ExposeSecret;
+	// Both the canonical camelCase spelling and the legacy snake_case aliases must
+	// parse to the same values, so pre-existing service-principal configs keep working.
+	for creds in [
+		r#"
+    tenantId: tenant
+    clientId: client
+    clientSecret: secret"#,
+		r#"
+    tenant_id: tenant
+    client_id: client
+    client_secret: secret"#,
+	] {
+		let azure: azure::AzureAuth =
+			crate::serdes::yamlviajson::from_str(&format!("explicitConfig:\n  clientSecret:{creds}\n"))
+				.unwrap_or_else(|e| panic!("client secret azure auth should deserialize ({creds:?}): {e}"));
+		let azure::AzureAuthMethod::ExplicitConfig {
+			credential_source:
+				azure::AzureAuthCredentialSource::ClientSecret {
+					tenant_id,
+					client_id,
+					client_secret,
+				},
+		} = &azure.method
+		else {
+			panic!(
+				"expected explicit client-secret method, got {:?}",
+				azure.method
+			);
+		};
+		assert_eq!(tenant_id, "tenant");
+		assert_eq!(client_id, "client");
+		assert_eq!(client_secret.expose_secret(), "secret");
+		assert!(azure.policies.is_empty());
+	}
+}
+
+#[test]
 fn test_aws_auth_deserializes_assume_role() {
 	let implicit: AwsAuth = serde_json::from_value(serde_json::json!({
 		"assumeRole": {

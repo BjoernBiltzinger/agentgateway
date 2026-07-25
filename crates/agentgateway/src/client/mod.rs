@@ -1,4 +1,3 @@
-mod azure;
 mod connect_tunnel;
 mod dns;
 mod hbone_tunnel;

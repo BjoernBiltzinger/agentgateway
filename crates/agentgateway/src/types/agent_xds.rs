@@ -1292,19 +1292,18 @@ fn backend_auth_kind_from_proto(
 							return Err(ProtoError::MissingRequiredField);
 						},
 					};
-					auth::azure::AzureAuth::ExplicitConfig {
-						credential_source: src,
-						cached_cred: Default::default(),
+					auth::azure::AzureAuth {
+						method: auth::azure::AzureAuthMethod::ExplicitConfig {
+							credential_source: src,
+						},
+						..Default::default()
 					}
 				},
-				Some(proto::agent::azure::Kind::DeveloperImplicit(_)) => {
-					auth::azure::AzureAuth::DeveloperImplicit {
-						cached_cred: Default::default(),
-					}
+				Some(proto::agent::azure::Kind::DeveloperImplicit(_)) => auth::azure::AzureAuth {
+					method: auth::azure::AzureAuthMethod::DeveloperImplicit {},
+					..Default::default()
 				},
-				Some(proto::agent::azure::Kind::Implicit(_)) => auth::azure::AzureAuth::Implicit {
-					cached_cred: Default::default(),
-				},
+				Some(proto::agent::azure::Kind::Implicit(_)) => auth::azure::AzureAuth::default(),
 				None => return Err(ProtoError::MissingRequiredField),
 			};
 			BackendAuthKind::Azure(azure_auth)

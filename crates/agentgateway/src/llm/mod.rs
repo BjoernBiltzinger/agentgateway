@@ -967,11 +967,10 @@ impl AIProvider {
 				..btls
 			},
 			AIProvider::Azure(p) => BackendPolicies {
-				backend_auth: Some(BackendAuth::new(BackendAuthKind::Azure(
-					AzureAuth::Implicit {
-						cached_cred: p.cached_cred.clone(),
-					},
-				))),
+				backend_auth: Some(BackendAuth::new(BackendAuthKind::Azure(AzureAuth {
+					cached_cred: p.cached_cred.clone(),
+					..Default::default()
+				}))),
 				..btls
 			},
 			AIProvider::Custom(_) => return None,

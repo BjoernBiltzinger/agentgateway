@@ -2089,6 +2089,124 @@ fn test_mcp_backend_host_rejects_mixed_host_and_backend() {
 }
 
 #[tokio::test]
+async fn test_local_azure_backend_auth_back_compat() {
+	// Config forms predating the auth `policies` field must keep parsing unchanged.
+	for auth in [
+		"implicit: {}",
+		"developerImplicit: {}",
+		// Credential-source fields accept snake_case via serde aliases (legacy
+		// spelling); camelCase is the canonical form. Exercise snake_case here.
+		r#"explicitConfig:
+                clientSecret:
+                  tenant_id: tenant
+                  client_id: client
+                  client_secret: secret"#,
+	] {
+		let input = format!(
+			r#"
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - backends:
+      - host: 127.0.0.1:8000
+        policies:
+          backendAuth:
+            azure:
+              {auth}
+"#
+		);
+		let normalized = normalize_test_yaml(&input)
+			.await
+			.unwrap_or_else(|e| panic!("azure auth {auth:?} should parse: {e}"));
+		let route = &normalized.listener_routes[0].1[0];
+		let [BackendTrafficPolicy::BackendAuth(ba)] = route.backends[0].inline_policies.as_slice()
+		else {
+			panic!("expected azure backendAuth policy for {auth:?}");
+		};
+		let Some(http::auth::BackendAuthKind::Azure(azure)) = &ba.kind else {
+			panic!(
+				"expected azure backendAuth kind for {auth:?}, got {:?}",
+				ba.kind
+			);
+		};
+		assert!(
+			azure.policies.is_empty(),
+			"no credential-flow policies configured for {auth:?}"
+		);
+	}
+}
+
+#[tokio::test]
+async fn test_local_azure_backend_auth_policies() {
+	let input = r#"
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - backends:
+      - host: 127.0.0.1:8000
+        policies:
+          backendAuth:
+            azure:
+              implicit: {}
+              policies:
+                backendTunnel:
+                  proxy:
+                    host: 127.0.0.1:3128
+"#;
+
+	let normalized = normalize_test_yaml(input).await.unwrap();
+	let route = &normalized.listener_routes[0].1[0];
+	let [BackendTrafficPolicy::BackendAuth(ba)] = route.backends[0].inline_policies.as_slice() else {
+		panic!("expected azure backendAuth policy");
+	};
+	let Some(http::auth::BackendAuthKind::Azure(azure)) = &ba.kind else {
+		panic!("expected azure backendAuth kind, got {:?}", ba.kind);
+	};
+	assert!(matches!(
+		azure.method,
+		http::auth::azure::AzureAuthMethod::Implicit {}
+	));
+	let [BackendTrafficPolicy::Tunnel(tunnel)] = azure.policies.as_slice() else {
+		panic!(
+			"expected tunnel policy in auth policies, got {:?}",
+			azure.policies
+		);
+	};
+	match tunnel.proxy.as_ref() {
+		types::agent::SimpleBackendReference::InlineBackend(Target::Address(addr)) => {
+			assert_eq!(*addr, "127.0.0.1:3128".parse().unwrap())
+		},
+		other => panic!("expected inline proxy backend, got {other:?}"),
+	}
+}
+
+#[tokio::test]
+async fn test_local_azure_backend_auth_unknown_field_rejected() {
+	let input = r#"
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - backends:
+      - host: 127.0.0.1:8000
+        policies:
+          backendAuth:
+            azure:
+              implicit: {}
+              policys:
+                backendTunnel:
+                  proxy:
+                    host: 127.0.0.1:3128
+"#;
+
+	normalize_test_yaml(input)
+		.await
+		.expect_err("typo'd key under azure auth should be rejected");
+}
+
+#[tokio::test]
 async fn test_top_level_backend_targeted_transformations_are_backend_policies() {
 	let normalized = normalize_test_yaml(
 		r#"

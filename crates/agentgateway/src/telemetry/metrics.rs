@@ -175,6 +175,7 @@ pub enum OutboundCallSubtype {
 	Guardrail,
 	RateLimit,
 	Oidc,
+	BackendAuth,
 }
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]

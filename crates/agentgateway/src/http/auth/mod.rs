@@ -1,5 +1,6 @@
 pub mod aws;
 pub mod azure;
+mod azure_transport;
 mod copilot;
 pub mod gcp;
 pub mod oauth;
@@ -23,7 +24,9 @@ use crate::http::Request;
 use crate::http::jwt::Claims;
 use crate::proxy::ProxyError;
 use crate::proxy::ProxyError::ProcessingString;
+use crate::proxy::httpproxy::PolicyClient;
 use crate::serdes::deser_key_from_file;
+use crate::telemetry::metrics::{OutboundCallKind, OutboundCallSubtype};
 use crate::types::agent::{BackendTarget, Target};
 use crate::*;
 
@@ -221,13 +224,11 @@ async fn apply_backend_auth_kind(
 			// We handle this in 'apply_late_backend_auth' since it must come at the end (due to request signing)!
 		},
 		BackendAuthKind::Azure(azure_auth) => {
-			let token = azure::get_token(
-				&backend_info.inputs.upstream,
-				azure_auth,
-				&backend_info.call_target,
-			)
-			.await
-			.map_err(ProxyError::BackendAuthenticationFailed)?;
+			let client = PolicyClient::new(backend_info.inputs.clone())
+				.with_outbound(OutboundCallKind::Policy, OutboundCallSubtype::BackendAuth);
+			let token = azure::get_token(client, azure_auth, &backend_info.call_target)
+				.await
+				.map_err(ProxyError::BackendAuthenticationFailed)?;
 			req.headers_mut().insert(http::header::AUTHORIZATION, token);
 		},
 		BackendAuthKind::Copilot => {

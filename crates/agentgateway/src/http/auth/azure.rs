@@ -6,21 +6,30 @@ use azure_identity::UserAssignedId;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::trace;
 
+use super::azure_transport::AzurePolicyHttpClient;
+use crate::proxy::httpproxy::PolicyClient;
 use crate::serdes::schema;
+use crate::types::agent::BackendTrafficPolicy;
 use crate::util::ErrorContext;
-use crate::{apply, client, ser_redact};
+use crate::{apply, ser_redact};
 
 // The Rust sdk for Azure is the only one that requires users to manually specify their auth method
 // for all non-developer use-cases. Therefore, we have to carry these different options in our API....
 // More context here: https://github.com/Azure/azure-sdk-for-rust/issues/2283
 #[apply(schema!)]
 pub enum AzureAuthCredentialSource {
+	// camelCase to match the rest of the config; snake_case aliases kept permanently
+	// since earlier releases only accepted snake_case here (this variant lacked the
+	// rename), so existing service-principal configs must keep working.
+	#[serde(rename_all = "camelCase")]
 	ClientSecret {
+		#[serde(alias = "tenant_id")]
 		#[cfg_attr(feature = "schema", schemars(with = "String"))]
 		tenant_id: String,
+		#[serde(alias = "client_id")]
 		#[cfg_attr(feature = "schema", schemars(with = "String"))]
 		client_id: String,
-		#[serde(serialize_with = "ser_redact")]
+		#[serde(alias = "client_secret", serialize_with = "ser_redact")]
 		#[cfg_attr(feature = "schema", schemars(with = "String"))]
 		client_secret: SecretString,
 	},
@@ -57,37 +66,53 @@ impl std::fmt::Debug for AzureCredentialCache {
 }
 
 #[apply(schema!)]
-pub enum AzureAuth {
+pub enum AzureAuthMethod {
 	/// Use explicit Azure credentials
 	#[serde(rename_all = "camelCase")]
 	ExplicitConfig {
 		#[serde(flatten)]
 		credential_source: AzureAuthCredentialSource,
-		/// Cached credential, populated on first use.
-		#[serde(skip)]
-		#[cfg_attr(feature = "schema", schemars(skip))]
-		cached_cred: AzureCredentialCache,
 	},
 	/// Use implicit Azure auth. Note that this is for developer use-cases only!
-	DeveloperImplicit {
-		/// Cached credential, populated on first use.
-		#[serde(skip)]
-		#[cfg_attr(feature = "schema", schemars(skip))]
-		cached_cred: AzureCredentialCache,
-	},
+	DeveloperImplicit {},
 	/// Automatically detect authentication method based on environment.
 	/// Uses Workload Identity on K8s, Managed Identity on Azure VMs, or Developer Tools locally.
-	Implicit {
-		/// Cached credential, populated on first use.
-		#[serde(skip)]
-		#[cfg_attr(feature = "schema", schemars(skip))]
-		cached_cred: AzureCredentialCache,
-	},
+	Implicit {},
+}
+
+#[apply(schema!)]
+pub struct AzureAuth {
+	/// Azure authentication method.
+	#[serde(flatten)]
+	pub method: AzureAuthMethod,
+	/// Backend policies (such as backendTunnel or backendTLS) used when connecting to
+	/// the identity provider to fetch credentials (Microsoft Entra ID, IMDS, etc.).
+	/// Tunnels are never applied to host-local endpoints (IMDS, the localhost
+	/// identity endpoints on Azure Arc and Cloud Shell), which are only reachable
+	/// directly from the host. Credential requests have a default request
+	/// timeout of 5 seconds, overridable with an `http` requestTimeout policy;
+	/// the total token fetch is bounded by the same value.
+	#[serde(
+		default,
+		deserialize_with = "crate::types::local::de_from_local_backend_policy",
+		skip_serializing_if = "Vec::is_empty"
+	)]
+	#[cfg_attr(
+		feature = "schema",
+		schemars(with = "Option<crate::types::local::SimpleLocalBackendPolicies>")
+	)]
+	pub policies: Vec<BackendTrafficPolicy>,
+	/// Cached credential, populated on first use.
+	#[serde(skip)]
+	#[cfg_attr(feature = "schema", schemars(skip))]
+	pub cached_cred: AzureCredentialCache,
 }
 
 impl Default for AzureAuth {
 	fn default() -> Self {
-		Self::Implicit {
+		Self {
+			method: AzureAuthMethod::Implicit {},
+			policies: Vec::new(),
 			cached_cred: Default::default(),
 		}
 	}
@@ -231,17 +256,22 @@ fn has_managed_identity_env_vars() -> bool {
 }
 
 async fn build_credential(
-	client: &client::Client,
+	client: PolicyClient,
 	auth: &AzureAuth,
 ) -> anyhow::Result<Arc<dyn TokenCredential>> {
+	// Route all SDK credential-flow requests through the policy-aware client so
+	// connection policies (backendTunnel, backendTLS, ...) apply to token fetches.
 	let client_options = azure_core::http::ClientOptions {
-		transport: Some(azure_core::http::Transport::new(Arc::new(client.clone()))),
+		transport: Some(azure_core::http::Transport::new(Arc::new(
+			AzurePolicyHttpClient {
+				client,
+				policies: Arc::new(auth.policies.clone()),
+			},
+		))),
 		..Default::default()
 	};
-	match auth {
-		AzureAuth::ExplicitConfig {
-			credential_source, ..
-		} => match credential_source {
+	match &auth.method {
+		AzureAuthMethod::ExplicitConfig { credential_source } => match credential_source {
 			AzureAuthCredentialSource::ClientSecret {
 				tenant_id,
 				client_id,
@@ -286,8 +316,10 @@ async fn build_credential(
 				))?)
 			},
 		},
-		AzureAuth::DeveloperImplicit { .. } => Ok(azure_identity::DeveloperToolsCredential::new(None)?),
-		AzureAuth::Implicit { .. } => {
+		AzureAuthMethod::DeveloperImplicit {} => {
+			Ok(azure_identity::DeveloperToolsCredential::new(None)?)
+		},
+		AzureAuthMethod::Implicit {} => {
 			// Build a DefaultAzureCredential chain following the Azure Go SDK pattern.
 			// Each credential is tried in order; the first to succeed is cached and
 			// used for all subsequent requests.
@@ -437,25 +469,23 @@ async fn build_credential(
 	}
 }
 pub(super) async fn get_token(
-	client: &client::Client,
+	client: PolicyClient,
 	auth: &AzureAuth,
 	target: &crate::types::agent::Target,
 ) -> anyhow::Result<http::HeaderValue> {
-	let cache = match auth {
-		AzureAuth::Implicit { cached_cred, .. } => &cached_cred.0,
-		AzureAuth::DeveloperImplicit { cached_cred, .. } => &cached_cred.0,
-		AzureAuth::ExplicitConfig { cached_cred, .. } => &cached_cred.0,
-	};
-	let cred = cache
+	let cred = auth
+		.cached_cred
+		.0
 		.get_or_try_init(|| build_credential(client, auth))
 		.await?
 		.clone();
 	// Foundry endpoints (.services.ai.azure.com) require the ai.azure.com scope
 	let is_foundry = matches!(target, crate::types::agent::Target::Hostname(h, _) if h.ends_with(".services.ai.azure.com"));
 	let scopes = if is_foundry { FOUNDRY_SCOPES } else { SCOPES };
-	let token = tokio::time::timeout(super::CLOUD_AUTH_TIMEOUT, cred.get_token(scopes, None))
+	let budget = super::azure_transport::credential_flow_budget(&auth.policies);
+	let token = tokio::time::timeout(budget, cred.get_token(scopes, None))
 		.await
-		.ctx("Azure token fetch timed out after 5s")??;
+		.ctx(format!("Azure token fetch timed out after {budget:?}"))??;
 	let mut hv = http::HeaderValue::from_str(&format!("Bearer {}", token.token.secret()))?;
 	hv.set_sensitive(true);
 	trace!("attached Azure token (scope: {})", scopes[0]);
